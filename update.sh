@@ -1,5 +1,5 @@
 #!/bin/bash
-mkdir /srv/opt
+ mkdir /srv/opt
 sudo echo "/opt /srv/opt none rw,bind 0 0" > /etc/fstab
 sudo systemctl daemon-reload
 sudo mount -a
