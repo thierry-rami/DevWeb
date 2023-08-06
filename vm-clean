@@ -1,0 +1,8 @@
+#!/bin/bash
+# purge *.gz
+find /var/log -type f -regex ".*\.gz$" -delete
+# pouge log.1 .2 .x
+find /var/log -type f -regex ".*\.[0-9]$" -delete
+find /var/log -type f -regex ".*\.[0-9].log$" -delete
+# purge tous les fichiers
+find /var/log -type f -iname '*' -print0 | xargs -0 truncate -s0

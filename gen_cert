@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+_output_dir=~/certs/
+rm $_output_dir/* &> /dev/null
+_project_name=$(cat /etc/hostname)
+_authority="${_project_name}"
+
+_project_domain="$_project_name.local"
+_name="${_project_domain}"
+_cert_pem=${_output_dir}/${_name}.pem
+_cert_crt=${_output_dir}/${_name}.crt
+_cert_key=${_output_dir}/${_name}.key
+
+_key=/tmp/${_name}.key
+_cn=${_name}
+_csr_cnf=/tmp/${_name}.csr.cnf
+_csr=/tmp/${_name}.csr
+_v3_ext=/tmp/${_name}.v3.ext
+_srl=/tmp/${_name}.srl
+
+cat << EOF > ${_csr_cnf}
+[req]
+default_bits = 2048
+prompt = no
+default_md = sha256
+distinguished_name = dn
+
+[dn]
+O=${_authority}
+CN=${_name}
+EOF
+
+cat << EOF > ${_v3_ext}
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = ${_name}
+DNS.2 = *.${_name}
+EOF
+
+openssl genrsa -out ${_key} 2048 >> /dev/null 2>&1
+openssl req -x509 -new -nodes -key ${_key} -sha256 -days 7500 -out ${_cert_pem} -subj "/O=${_authority}/CN=${_cn}" >/dev/null 2>&1
+openssl req -new -sha256 -nodes -out ${_csr} -newkey rsa:2048 -keyout ${_cert_key} -config <( cat ${_csr_cnf} ) >/dev/null 2>&1
+openssl x509 -req -in ${_csr} -CA ${_cert_pem} -CAcreateserial -CAserial ${_srl} -CAkey ${_key} -out ${_cert_crt} -days 7500 -sha256 -extfile ${_v3_ext}  >/dev/null 2>&1
+
+_vhost_nginx=${_output_dir}/${_name}.vhost-nginx.conf
+
+cat << EOF > ${_vhost_nginx}
+server {
+        listen 80 default_server;
+        listen [::]:80 default_server;
+        server_name ${_name};
+        return 302 https://\$server_name\$request_uri;
+       }
+
+server {
+        listen 443 ssl default_server;
+        listen [::]:443 ssl default_server;
+        server_name ${_name};
+        ssl_certificate /srv/certs/${_name}.crt;
+        ssl_certificate_key /srv/certs/${_name}.key;
+
+   location /code-server/ {
+     proxy_pass https://127.0.0.1:8680/;
+     proxy_set_header X-Real-IP \$remote_addr;
+     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+     proxy_set_header Host \$http_host;
+     proxy_set_header X-NginX-Proxy true;
+     proxy_http_version 1.1;
+     proxy_set_header Upgrade \$http_upgrade;
+     proxy_set_header Connection "upgrade";
+     proxy_redirect off;
+    }
+
+  location /webmin/ {
+        proxy_pass http://127.0.0.1:10000/;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$http_x_forwarded_for;
+        proxy_redirect http://\$host:10000/ http://\$host/;
+
+  }
+
+   location / {
+        root   /srv/www;
+        index  index.php index.html index.htm;
+        autoindex on;
+        autoindex_exact_size off;
+        autoindex_format html;
+        autoindex_localtime on;
+    }
+
+location ~ \.php$
+    {
+     root           /srv/www;
+     try_files      \$uri =404;
+     fastcgi_index  index.php;
+     fastcgi_pass   unix:/run/php/php8.2-fpm.sock;
+     fastcgi_param  SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+     include        fastcgi_params;
+    }
+    error_page   500 502 503 504  /50x.html;
+    location = /50x.html {
+        root   /srv/www;
+    }
+
+}
+EOF
+
+##### on met a jour les certificats SSL
+sudo service nginx stop &> /dev/null
+sudo service code-server@FtpWeb stop &> /dev/null
+sudo service webmin stop &> /dev/null
+sudo service cockpit stop &> /dev/null
+
+sudo cp certs/$_project_domain.vhost-nginx.conf /etc/nginx/conf.d/default.conf &> /dev/null
+cp ~/certs/$_project_domain.crt /srv/.local/share/code-server/localhost.crt &> /dev/null
+cp ~/certs/$_project_domain.key /srv/.local/share/code-server/localhost.key &> /dev/null
+cp certs/*.pem ~/www/. &> /dev/null
+sudo cat /srv/certs/$_project_domain.key /srv/certs/$_project_domain.crt > /etc/webmin/miniserv.pem
+sudo service proftpd stop &> /dev/null
+cat << EOF > /tmp/tls.conf
+<IfModule mod_tls.c>
+TLSEngine on
+TLSLog /var/log/proftpd/tls.log
+TLSProtocol SSLv23
+TLSRSACertificateFile /srv/certs/$_project_domain.crt
+TLSRSACertificateKeyFile /srv/certs/$_project_domain.key
+TLSVerifyClient off
+TLSRequired on
+</IfModule>
+EOF
+sudo rm /etc/proftpd/tls* &>/dev/null
+sudo mv /tmp/tls.conf /etc/proftpd/tls.conf &> /dev/null
+sudo chown -R root:root /etc/proftpd/tls.conf &> /dev/null
+sudo service proftpd start &> /dev/null
+
+sudo service nginx start &> /dev/null
+sudo service code-server@FtpWeb start &> /dev/null
+
+sudo service webmin stop &> /dev/null
+sudo sed -i '/referers=/d' /etc/webmin/config &> /dev/null
+sudo echo "referers=$_project_domain" >> /etc/webmin/config
+sudo service webmin start &> /dev/null
+
+sudo rm /etc/cockpit/ws-certs.d/* &>/dev/null &> /dev/null
+sudo cp /srv/certs/*.crt /etc/cockpit/ws-certs.d/ &> /dev/null
+sudo cp /srv/certs/*.key /etc/cockpit/ws-certs.d/ &> /dev/null
+sudo chown cockpit-ws:cockpit-ws /etc/cockpit/ws-certs.d/* &> /dev/null
+sudo service cockpit start &> /dev/null
